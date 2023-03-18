@@ -11,6 +11,7 @@ type Group struct {
 	name      string
 	getter    Getter // 缓存未命中的回调函数
 	mainCache cache  // 支持并发
+	peers     PeerPicker
 }
 
 // Getter 通过关键字，返回缓存的字节类型
@@ -69,8 +70,33 @@ func (g *Group) Get(key string) (ByteView, error) {
 	return g.load(key) // 缓存不存在
 }
 
+// RegisterPeers 注册一个PeerPicker用于选择远端节点
+func (g *Group) RegisterPeers(peers PeerPicker) {
+	if g.peers != nil {
+		panic("RegisterPeerPicker called more than once")
+	}
+	g.peers = peers
+}
+
 func (g *Group) load(key string) (value ByteView, err error) {
-	return g.getLocally(key) // 从本地获取对应数据
+	if g.peers != nil {
+		if peer, ok := g.peers.PickPeer(key); ok {
+			if value, err = g.getFromPeer(peer, key); err == nil {
+				return value, nil
+			}
+			log.Println("[GoCache] Failed to get from peer", err)
+		}
+	}
+	return g.getLocally(key) // 远端获取失败，从本地获取对应数据
+}
+
+// 使用实现了PeerGetter接口的httpGetter从访问远端节点获取缓存值
+func (g *Group) getFromPeer(peer PeerGetter, key string) (ByteView, error) {
+	bytes, err := peer.Get(g.name, key)
+	if err != nil {
+		return ByteView{}, err
+	}
+	return ByteView{b: bytes}, nil
 }
 
 func (g *Group) getLocally(key string) (ByteView, error) {
