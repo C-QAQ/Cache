@@ -2,6 +2,7 @@ package gocache
 
 import (
 	"fmt"
+	"gocache/singleflight"
 	"log"
 	"sync"
 )
@@ -12,6 +13,8 @@ type Group struct {
 	getter    Getter // 缓存未命中的回调函数
 	mainCache cache  // 支持并发
 	peers     PeerPicker
+	// 确保了并发场景下针对相同的 key，load 过程只会调用一次。
+	loader *singleflight.Group
 }
 
 // Getter 通过关键字，返回缓存的字节类型
@@ -43,6 +46,7 @@ func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
 		name:      name,
 		getter:    getter,
 		mainCache: cache{cacheBytes: cacheBytes},
+		loader:    &singleflight.Group{},
 	}
 	groups[name] = g // 添加映射关系
 	return g
@@ -79,15 +83,22 @@ func (g *Group) RegisterPeers(peers PeerPicker) {
 }
 
 func (g *Group) load(key string) (value ByteView, err error) {
-	if g.peers != nil {
-		if peer, ok := g.peers.PickPeer(key); ok {
-			if value, err = g.getFromPeer(peer, key); err == nil {
-				return value, nil
+	viewi, err := g.loader.Do(key, func() (interface{}, error) {
+		if g.peers != nil {
+			if peer, ok := g.peers.PickPeer(key); ok {
+				if value, err = g.getFromPeer(peer, key); err == nil {
+					return value, nil
+				}
+				log.Println("[GoCache] Failed to get from peer", err)
 			}
-			log.Println("[GoCache] Failed to get from peer", err)
 		}
+		return g.getLocally(key) // 远端获取失败，从本地获取对应数据
+	})
+
+	if err == nil {
+		return viewi.(ByteView), nil
 	}
-	return g.getLocally(key) // 远端获取失败，从本地获取对应数据
+	return
 }
 
 // 使用实现了PeerGetter接口的httpGetter从访问远端节点获取缓存值
